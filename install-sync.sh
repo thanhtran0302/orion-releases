@@ -6,6 +6,8 @@
 #   - le HTTPS : nginx s'il sert déjà Hermes, sinon Caddy avec un certificat automatique. Tout passe par Orion Sync,
 #     qui relaie vers Hermes avec la clé de Hermes : elle ne quitte plus le serveur ;
 #   - l'API de Hermes activée si besoin, et le terminal du Mac (outil mac_terminal) déclaré à Hermes ;
+#   - les applications connectées (docs/connecteurs.md) : la clé de serveur ors_… rendue par orionspace.ai, le serveur
+#     MCP orion-apps déclaré à Hermes, et les connecteurs de Nous coupés (leur écran affiche « Hermes Agent ») ;
 #   - les notifications iPhone par le relais (une clé de relais, à créer sur le serveur qui a la clé APNs) ;
 #   - une sauvegarde de la base chaque nuit.
 # Un code refusé ne change rien au serveur. Relancer le script met à jour, sans toucher aux secrets ni au compte, et
@@ -25,8 +27,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.13.0"
-SHA256="b1b7c44cc56f077db72fa446b63daf853bc8f124fcfb0180c4ed0c1b0ba36877"
+VERSION="0.14.0"
+SHA256="8607b7f3888b0b468cec88fcf2c99fda366684fc9e12e2c4466e723f0f66a96b"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
@@ -155,6 +157,7 @@ ACCOUNT_URL=${ACCOUNT_URL%/}
 SERVER_ID=$(kv_get "$SYNCF" ACCOUNT_SERVER_ID)
 OWNER=$(kv_get "$SYNCF" ACCOUNT_OWNER)
 ISSUER=$(kv_get "$SYNCF" ACCOUNT_ISSUER)
+SERVER_KEY=$(kv_get "$SYNCF" ACCOUNT_SERVER_KEY)
 # Une mise à jour garde le compte : un code ne sert que pour relier le serveur, ou changer son adresse.
 if [ -z "$ACCOUNT_CODE" ] && [ -z "$SERVER_ID" ]; then
   note "le code d'installation se crée avec « pnpm run server add <e-mail du client> », dans apps/account."
@@ -261,6 +264,9 @@ if [ -n "$ACCOUNT_CODE" ]; then
   if ! [[ $SERVER_ID =~ ^srv_[A-Za-z0-9_-]+$ && $OWNER =~ ^user_[A-Za-z0-9_-]+$ && $ISSUER =~ ^https?://[^[:space:]]+$ ]]; then
     die "réponse inattendue d'orionspace.ai : $answer. Le code a peut-être servi : crée-en un autre avant de relancer."
   fi
+  # La clé de serveur des applications connectées : nouvelle à chaque enregistrement, jamais affichée.
+  SERVER_KEY=$(json_get "$answer" serverKey)
+  [[ $SERVER_KEY =~ ^ors_[A-Za-z0-9_-]{43}$ ]] || SERVER_KEY=""
   # Gardé tout de suite : le code ne resservira pas, une installation interrompue reprend avec ce compte.
   install -d -m 755 "$DIR"
   [ -f "$ENVF" ] || install -m 600 /dev/null "$ENVF"
@@ -268,6 +274,7 @@ if [ -n "$ACCOUNT_CODE" ]; then
   kv_set "$SYNCF" ACCOUNT_ISSUER "$ISSUER"
   kv_set "$SYNCF" ACCOUNT_SERVER_ID "$SERVER_ID"
   kv_set "$SYNCF" ACCOUNT_OWNER "$OWNER"
+  [ -z "$SERVER_KEY" ] || kv_set "$SYNCF" ACCOUNT_SERVER_KEY "$SERVER_KEY"
   kv_set "$ENVF" ORION_ACCOUNT_URL "$ACCOUNT_URL"
   kv_set "$ENVF" ORION_REGISTERED_URL "$PUBLIC"
   ok "relié au compte $OWNER ($SERVER_ID), à l'adresse $PUBLIC"
@@ -357,6 +364,7 @@ HOST=127.0.0.1
 PORT=$SYNC_PORT
 ORION_MCP_TOKEN=$MCP_TOKEN
 EOF
+[ -z "$SERVER_KEY" ] || printf 'ACCOUNT_SERVER_KEY=%s\n' "$SERVER_KEY" >> "$SYNCF.new"
 [ -z "$RELAY_KEY" ] || printf 'PUSH_RELAY_URL=%s\nPUSH_RELAY_KEY=%s\n' "$RELAY_URL" "$RELAY_KEY" >> "$SYNCF.new"
 chmod 600 "$SYNCF.new"
 mv "$SYNCF.new" "$SYNCF"
@@ -448,10 +456,35 @@ if [ -n "$HBIN" ]; then
   as_hermes hermes config set mcp_servers.orion-mac.timeout 480 > /dev/null
   as_hermes hermes config set mcp_servers.orion-mac.enabled true > /dev/null
   ok "Hermes connaît l'outil mac_terminal (serveur MCP orion-mac)"
-  if as_hermes hermes mcp test orion-mac 2>&1 | grep -q mac_terminal; then MCP_OK=1; else warn "hermes mcp test orion-mac ne trouve pas l'outil."; fi
+  # La sortie entière d'abord : avec pipefail, « | grep -q » ferait échouer une sortie longue (SIGPIPE).
+  tested=$(as_hermes hermes mcp test orion-mac 2>&1 || true)
+  if grep -q mac_terminal <<< "$tested"; then MCP_OK=1; else warn "hermes mcp test orion-mac ne trouve pas l'outil."; fi
 else
   note "à ajouter dans $HH/config.yaml, sous mcp_servers: orion-mac (url http://127.0.0.1:$SYNC_PORT/mcp/mac,"
   note "headers Authorization: Bearer \${ORION_MCP_TOKEN}, timeout 480) ; ORION_MCP_TOKEN est dans $HENV."
+fi
+
+# ---------------------------------------------------------------- Les applications connectées, pour Hermes
+
+step "Les applications connectées"
+APPS_OK=0
+if [ -z "$SERVER_KEY" ]; then
+  warn "pas de clé de serveur : ce serveur a été relié à son compte avant les applications connectées."
+  note "crée un code (pnpm run server add <e-mail du client>) et relance avec --account-code : orionspace.ai donnera la clé."
+elif [ -n "$HBIN" ]; then
+  # La même clé que le terminal du Mac (ORION_MCP_TOKEN, dans le .env de Hermes) ; timeout : un appel d'outil.
+  as_hermes hermes config set mcp_servers.orion-apps.url "http://127.0.0.1:$SYNC_PORT/mcp/apps" > /dev/null
+  as_hermes hermes config set mcp_servers.orion-apps.headers.Authorization 'Bearer ${ORION_MCP_TOKEN}' > /dev/null
+  as_hermes hermes config set mcp_servers.orion-apps.timeout 300 > /dev/null
+  as_hermes hermes config set mcp_servers.orion-apps.enabled true > /dev/null
+  # Les connecteurs de Nous affichent « Hermes Agent » : les applications passent par orion-apps, au nom d'OrionSpace.
+  as_hermes hermes config set tools.connectors.enabled false > /dev/null
+  ok "Hermes connaît les applications connectées (serveur MCP orion-apps) ; les connecteurs de Nous sont coupés"
+  tested=$(as_hermes hermes mcp test orion-apps 2>&1 || true)
+  if grep -q COMPOSIO_SEARCH_TOOLS <<< "$tested"; then APPS_OK=1; else warn "hermes mcp test orion-apps ne trouve pas les outils."; fi
+else
+  note "à ajouter dans $HH/config.yaml, sous mcp_servers: orion-apps (url http://127.0.0.1:$SYNC_PORT/mcp/apps,"
+  note "headers Authorization: Bearer \${ORION_MCP_TOKEN}, timeout 300), et sous tools: connectors: enabled: false."
 fi
 
 if [ "$HERMES_ENV_CHANGED" = 1 ]; then
@@ -497,4 +530,5 @@ printf '  Compte  : %s (%s), chez %s\n' "$OWNER" "$SERVER_ID" "$ISSUER"
 printf '  Le client se connecte dans Orion avec son e-mail : aucune clé à lui transmettre.\n'
 [ -n "$RELAY_KEY" ] && printf '  Notifications : par le relais.\n' || printf '  Notifications : aucune (pas de clé de relais).\n'
 [ "$MCP_OK" = 1 ] && printf '  Terminal du Mac : prêt (Réglages, « Ce Mac » dans l'"'"'app Mac).\n'
+[ "$APPS_OK" = 1 ] && printf '  Applications : prêtes (« Connecter des applications » dans Orion).\n'
 printf '  Mettre à jour : relance la même commande.\n'
