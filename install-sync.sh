@@ -8,6 +8,8 @@
 #   - l'API de Hermes activée si besoin, et le terminal du Mac (outil mac_terminal) déclaré à Hermes ;
 #   - les applications connectées (docs/connecteurs.md) : la clé de serveur ors_… rendue par orionspace.ai, le serveur
 #     MCP orion-apps déclaré à Hermes, et les connecteurs de Nous coupés (leur écran affiche « Hermes Agent ») ;
+#   - le tableau de bord de Hermes (hermes serve, sur la machine seulement) : les tâches planifiées des agents et les
+#     fichiers qu'ils donnent reviennent dans Orion ;
 #   - les notifications iPhone par le relais (une clé de relais, à créer sur le serveur qui a la clé APNs) ;
 #   - une sauvegarde de la base chaque nuit.
 # Un code refusé ne change rien au serveur. Relancer le script met à jour, sans toucher aux secrets ni au compte, et
@@ -27,8 +29,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.14.0"
-SHA256="8607b7f3888b0b468cec88fcf2c99fda366684fc9e12e2c4466e723f0f66a96b"
+VERSION="0.16.0"
+SHA256="5769d49881b3086ccd891a6797862b8f3f56d8b056dfa5e01d7810830b18ea86"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
@@ -141,7 +143,8 @@ as_hermes() {
     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$HUID/bus" PATH="$HUHOME/.local/bin:/usr/local/bin:/usr/bin:/bin" "$@"
 }
 HBIN=""
-if as_hermes sh -c 'command -v hermes' > /dev/null 2>&1; then HBIN=hermes; fi
+HPATH=$(as_hermes sh -c 'command -v hermes' 2>/dev/null || true)
+if [ -n "$HPATH" ]; then HBIN=hermes; fi
 [ -n "$HBIN" ] || warn "la commande hermes est introuvable pour $HUSER : le terminal du Mac sera à déclarer à la main."
 HERMES_PORT=$(kv_get "$HENV" API_SERVER_PORT)
 HERMES_PORT=${HERMES_PORT:-8642}
@@ -308,6 +311,80 @@ if [ -z "$MCP_TOKEN" ]; then
 fi
 ok "sa clé reste sur ce serveur : Orion Sync la présente à Hermes à la place de celle de chaque appareil"
 
+# ---------------------------------------------------------------- Le tableau de bord de Hermes
+
+# `hermes serve`, sur la machine seulement : Orion Sync y lit ce que Hermes garde pour lui seul (fichiers en 0600), les
+# comptes rendus des tâches planifiées (src/crons.ts) et les fichiers que les agents donnent (src/files.ts). Un service
+# système sous l'utilisateur de Hermes, sans l'interface web (--skip-build). Le jeton partagé reste d'une installation à
+# l'autre, dans serve.env de Hermes (le même nom que sur un serveur où il est installé à la main, README « L'écran »).
+step "Le tableau de bord de Hermes"
+SERVE_UNIT=/etc/systemd/system/orion-hermes-serve.service
+SERVE_ENV="$HH/serve.env"
+SERVE_OK=0
+SERVE_OWN=0
+serve_answers() { curl -fsS --max-time 3 -H "Authorization: Bearer $SERVE_TOKEN" "http://127.0.0.1:$1/api/status" > /dev/null 2>&1; }
+if [ -z "$HPATH" ]; then
+  warn "la commande hermes est introuvable pour $HUSER : pas de tableau de bord, donc ni tâches planifiées ni fichiers des agents dans Orion."
+else
+  SERVE_TOKEN=$(kv_get "$SERVE_ENV" HERMES_DASHBOARD_SESSION_TOKEN)
+  if [ -z "$SERVE_TOKEN" ]; then
+    SERVE_TOKEN=$(random_hex)
+    [ -f "$SERVE_ENV" ] || install -m 600 -o "$HUSER" -g "$(id -gn "$HUSER")" /dev/null "$SERVE_ENV"
+    kv_set "$SERVE_ENV" HERMES_DASHBOARD_SESSION_TOKEN "$SERVE_TOKEN"
+  fi
+  if [ ! -f "$SERVE_UNIT" ] && serve_answers 9119; then
+    # Déjà installé à la main (service utilisateur hermes-serve, avec ce jeton) : on s'en sert tel quel.
+    SERVE_PORT=9119
+    SERVE_OK=1
+    ok "déjà en marche sur 127.0.0.1:9119 : Orion Sync s'en sert"
+  else
+    SERVE_OWN=1
+    SERVE_PORT=$(kv_get "$ENVF" HERMES_SERVE_PORT)
+    # Une installation interrompue avant de l'avoir noté : le port du service déjà écrit.
+    [ -n "$SERVE_PORT" ] || SERVE_PORT=$( { grep -o -- '--port [0-9]*' "$SERVE_UNIT" 2>/dev/null || true; } | cut -d' ' -f2)
+    if [ -z "$SERVE_PORT" ]; then
+      SERVE_PORT=9119
+      while port_used "$SERVE_PORT"; do SERVE_PORT=$((SERVE_PORT + 1)); done
+    fi
+    cat > "$SERVE_UNIT.new" <<EOF
+# Écrit par l'installation d'Orion Sync (install-sync.sh) : le tableau de bord de Hermes, pour Orion Sync seulement.
+[Unit]
+Description=Hermes : tableau de bord pour Orion Sync (127.0.0.1:$SERVE_PORT)
+After=network-online.target
+
+[Service]
+Type=simple
+User=$HUSER
+WorkingDirectory=$HH
+Environment="HOME=$HUHOME"
+Environment="HERMES_HOME=$HH"
+Environment="PATH=$(dirname "$HPATH"):$HUHOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=$SERVE_ENV
+ExecStart="$HPATH" serve --host 127.0.0.1 --port $SERVE_PORT --skip-build
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    mv "$SERVE_UNIT.new" "$SERVE_UNIT"
+    systemctl daemon-reload
+    systemctl enable orion-hermes-serve > /dev/null 2>&1
+    # Toujours relancé : une mise à jour de Hermes, ou un nouveau jeton, est prise.
+    systemctl restart orion-hermes-serve
+    for _ in $(seq 1 90); do
+      if serve_answers "$SERVE_PORT"; then SERVE_OK=1; break; fi
+      sleep 1
+    done
+    if [ "$SERVE_OK" = 1 ]; then
+      ok "en marche sur 127.0.0.1:$SERVE_PORT (service orion-hermes-serve)"
+    else
+      journalctl -u orion-hermes-serve -n 15 --no-pager >&2 || true
+      warn "le tableau de bord ne répond pas : ni tâches planifiées ni fichiers des agents dans Orion. Relance le script une fois réglé."
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------- Docker
 
 step "Docker"
@@ -349,6 +426,7 @@ if [ -z "$PG_PORT" ]; then
 fi
 kv_set "$ENVF" ORION_SYNC_VERSION "$VERSION"
 kv_set "$ENVF" HERMES_PORT "$HERMES_PORT"
+[ "$SERVE_OWN" = 0 ] || kv_set "$ENVF" HERMES_SERVE_PORT "$SERVE_PORT"
 
 # La clé de Hermes, pour relayer vers lui ; jamais affichée. La clé de Hermes venue de l'extérieur est refusée : les
 # appareils n'entrent qu'avec leur propre clé, reçue en se connectant avec le compte.
@@ -366,6 +444,10 @@ ORION_MCP_TOKEN=$MCP_TOKEN
 EOF
 [ -z "$SERVER_KEY" ] || printf 'ACCOUNT_SERVER_KEY=%s\n' "$SERVER_KEY" >> "$SYNCF.new"
 [ -z "$RELAY_KEY" ] || printf 'PUSH_RELAY_URL=%s\nPUSH_RELAY_KEY=%s\n' "$RELAY_URL" "$RELAY_KEY" >> "$SYNCF.new"
+# L'écran des agents n'est pas installé ici : le tableau de bord ne sert qu'aux tâches planifiées et aux fichiers. Une
+# fois l'écran installé à la main (README, « L'écran des agents »), HERMES_SCREEN=true dans ce fichier reste.
+SCREEN=$(kv_get "$SYNCF" HERMES_SCREEN)
+[ "$SERVE_OK" = 0 ] || printf 'HERMES_SERVE_URL=http://127.0.0.1:%s\nHERMES_SERVE_TOKEN=%s\nHERMES_SCREEN=%s\n' "$SERVE_PORT" "$SERVE_TOKEN" "${SCREEN:-false}" >> "$SYNCF.new"
 chmod 600 "$SYNCF.new"
 mv "$SYNCF.new" "$SYNCF"
 ok "configuration : $SYNCF (root seul)"
@@ -397,6 +479,7 @@ done
 grep -qs "\"version\":\"$VERSION\"" "$tmp/health" || { docker logs --tail 30 orion-sync >&2 || true; die "Orion Sync $VERSION ne répond pas sur 127.0.0.1:$SYNC_PORT."; }
 ok "Orion Sync répond ($(grep -o '"features":\[[^]]*\]' "$tmp/health"))"
 grep -q '"accounts"' "$tmp/health" || warn "Orion Sync n'annonce pas « accounts » : le client ne pourra pas se connecter (docker logs orion-sync)."
+if [ "$SERVE_OK" = 1 ] && ! grep -q '"crons"' "$tmp/health"; then warn "Orion Sync n'annonce pas « crons » : les tâches planifiées ne reviendront pas dans Orion (docker logs orion-sync)."; fi
 # Le Caddyfile a pu changer (mise à jour) : Caddy le relit, sans couper les connexions.
 if [ "$PROFILES" = caddy ]; then
   docker exec orion-caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null 2>&1 || docker restart orion-caddy > /dev/null
@@ -531,4 +614,5 @@ printf '  Le client se connecte dans Orion avec son e-mail : aucune clé à lui 
 [ -n "$RELAY_KEY" ] && printf '  Notifications : par le relais.\n' || printf '  Notifications : aucune (pas de clé de relais).\n'
 [ "$MCP_OK" = 1 ] && printf '  Terminal du Mac : prêt (Réglages, « Ce Mac » dans l'"'"'app Mac).\n'
 [ "$APPS_OK" = 1 ] && printf '  Applications : prêtes (« Connecter des applications » dans Orion).\n'
+[ "$SERVE_OK" = 1 ] && printf '  Tâches planifiées et fichiers des agents : prêts (ils reviennent dans Orion).\n'
 printf '  Mettre à jour : relance la même commande.\n'
