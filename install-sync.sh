@@ -8,8 +8,12 @@
 #   - l'API de Hermes activée si besoin, et le terminal du Mac (outil mac_terminal) déclaré à Hermes ;
 #   - les applications connectées (docs/connecteurs.md) : la clé de serveur ors_… rendue par orionspace.ai, le serveur
 #     MCP orion-apps déclaré à Hermes, et les connecteurs de Nous coupés (leur écran affiche « Hermes Agent ») ;
+#   - le navigateur du Mac (browser.extension_control) : Hermes peut confier son navigateur à Orion Sync, qui le relaie
+#     à l'app Mac du client (ses agents naviguent alors dans son navigateur habituel, avec ses comptes) ;
 #   - le tableau de bord de Hermes (hermes serve, sur la machine seulement) : les tâches planifiées des agents et les
 #     fichiers qu'ils donnent reviennent dans Orion ;
+#   - le verrou (deploy/verrou.sh) : l'agent sans terminal, sans fichiers du serveur ni exécution de code, l'identité
+#     OrionSpace, et l'écran sans fichiers locaux, sans menu ni terminal ;
 #   - les notifications iPhone par le relais (une clé de relais, à créer sur le serveur qui a la clé APNs) ;
 #   - une sauvegarde de la base chaque nuit.
 # Un code refusé ne change rien au serveur. Relancer le script met à jour, sans toucher aux secrets ni au compte, et
@@ -29,8 +33,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.16.0"
-SHA256="5769d49881b3086ccd891a6797862b8f3f56d8b056dfa5e01d7810830b18ea86"
+VERSION="0.18.0"
+SHA256="5efd8c456f538c9fa0dc4a8819bf2c28a65fa56aa29fab3bcba5b4d6f09789ec"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
@@ -570,6 +574,32 @@ else
   note "headers Authorization: Bearer \${ORION_MCP_TOKEN}, timeout 300), et sous tools: connectors: enabled: false."
 fi
 
+# ---------------------------------------------------------------- Le navigateur du Mac, pour Hermes
+
+# Hermes confie son navigateur à Orion Sync (src/browser.ts), qui le relaie à l'app Mac : les agents naviguent dans le
+# navigateur habituel du client, avec ses comptes, quand il l'active dans l'app. Hermes relit ce réglage en marche.
+# Jamais developer_mode : il confierait le CDP brut et eval.
+step "Le navigateur du Mac"
+BROWSER_OK=0
+if [ -n "$HBIN" ]; then
+  as_hermes hermes config set browser.extension_control.enabled true > /dev/null && BROWSER_OK=1
+  [ "$BROWSER_OK" = 1 ] && ok "Hermes peut confier son navigateur au Mac du client (browser.extension_control)" || warn "hermes config set browser.extension_control.enabled a échoué."
+else
+  note "à ajouter dans $HH/config.yaml, sous browser: extension_control: enabled: true."
+fi
+
+# ---------------------------------------------------------------- Le verrou
+
+# Le serveur est une boîte noire pour le client (docs/securite.md) : ni terminal, ni fichiers, ni exécution de code pour
+# l'agent, l'identité OrionSpace, et l'écran sans fichiers locaux, sans menu ni terminal.
+step "Le verrou"
+if [ -n "$HBIN" ]; then
+  # Sans verrou, pas de serveur de client : l'installation s'arrête (la relancer reprend ici).
+  bash "$DIR/app/deploy/verrou.sh" --hermes-home "$HH" || die "le verrou n'a pas pu être posé : corrige ce qui manque, puis relance l'installation avant de donner le serveur au client."
+else
+  die "la commande hermes est introuvable pour $HUSER : impossible de poser le verrou (deploy/verrou.sh)."
+fi
+
 if [ "$HERMES_ENV_CHANGED" = 1 ]; then
   if [ -n "$HBIN" ] && as_hermes hermes gateway restart > "$tmp/gateway.log" 2>&1; then
     ok "Hermes redémarré (nouveaux réglages)"
@@ -614,5 +644,6 @@ printf '  Le client se connecte dans Orion avec son e-mail : aucune clé à lui 
 [ -n "$RELAY_KEY" ] && printf '  Notifications : par le relais.\n' || printf '  Notifications : aucune (pas de clé de relais).\n'
 [ "$MCP_OK" = 1 ] && printf '  Terminal du Mac : prêt (Réglages, « Ce Mac » dans l'"'"'app Mac).\n'
 [ "$APPS_OK" = 1 ] && printf '  Applications : prêtes (« Connecter des applications » dans Orion).\n'
+[ "$BROWSER_OK" = 1 ] && printf '  Navigateur du Mac : prêt (Réglages de l'"'"'app Mac, une fois la case cochée dans chrome://inspect).\n'
 [ "$SERVE_OK" = 1 ] && printf '  Tâches planifiées et fichiers des agents : prêts (ils reviennent dans Orion).\n'
 printf '  Mettre à jour : relance la même commande.\n'
