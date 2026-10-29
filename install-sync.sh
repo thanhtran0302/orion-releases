@@ -33,8 +33,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.24.0"
-SHA256="3d7c4913cb3aba53d355d5ebe53d583edd983a02fe1f0156351963b8843406e2"
+VERSION="0.25.0"
+SHA256="c7fe66bc955d6052e35d928552873e070ed8040456eb593afe338ff1621ecef4"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
