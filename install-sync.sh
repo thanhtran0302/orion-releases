@@ -12,6 +12,7 @@
 #     à l'app Mac du client (ses agents naviguent alors dans son navigateur habituel, avec ses comptes) ;
 #   - le tableau de bord de Hermes (hermes serve, sur la machine seulement) : les tâches planifiées des agents et les
 #     fichiers qu'ils donnent reviennent dans Orion ;
+#   - les moteurs de secours (fallback_providers) : quand le moteur de l'agent sature, un autre répond à sa place ;
 #   - le verrou (deploy/verrou.sh) : l'agent sans terminal, sans fichiers du serveur ni exécution de code, l'identité
 #     OrionSpace, et l'écran sans fichiers locaux, sans menu ni terminal ;
 #   - les notifications iPhone par le relais (une clé de relais, à créer sur le serveur qui a la clé APNs) ;
@@ -33,8 +34,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.28.0"
-SHA256="aaef93dfef325377d0bc44fa7b538f492caa008f3f1f84514bc41f9b98663c55"
+VERSION="0.29.0"
+SHA256="d5f31b4cfdcd0161515b53ce10c13fbeec2dda07f1ceeb3b49582fca3749378b"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
@@ -588,6 +589,43 @@ else
   note "à ajouter dans $HH/config.yaml, sous browser: extension_control: enabled: true."
 fi
 
+# ---------------------------------------------------------------- Les moteurs de secours, pour Hermes
+
+# Quand le moteur de l'agent sature (Z.ai répond « temporarily overloaded »), Hermes passe au suivant de
+# fallback_providers pour cette réponse, puis revient au sien à la suivante ; il relit ce réglage en marche. Avec Z.ai,
+# deux autres modèles du même abonnement : la même clé, sans frais en plus. Une chaîne déjà réglée n'est jamais touchée,
+# et rien n'est choisi pour un autre fournisseur (ses modèles et ses prix ne sont pas les mêmes).
+step "Les moteurs de secours"
+FALLBACK_COUNT=0
+if [ -n "$HBIN" ]; then
+  FALLBACK_COUNT=$(as_hermes hermes fallback list 2>/dev/null | sed -n 's/.*Fallback chain (\([0-9]*\) entr.*/\1/p' | head -1 || true)
+  FALLBACK_COUNT=${FALLBACK_COUNT:-0}
+  if [ "$FALLBACK_COUNT" -gt 0 ]; then
+    ok "déjà réglés ($FALLBACK_COUNT), gardés tels quels"
+  else
+    provider=$(as_hermes hermes config get model.provider 2>/dev/null | tail -1 | tr -d '[:space:]' || true)
+    main=$(as_hermes hermes config get model.default 2>/dev/null | tail -1 | tr -d '[:space:]' || true)
+    siblings=""
+    [ "$provider" = zai ] && siblings="glm-5.2 glm-5.3-flash"
+    chain=""
+    used=""
+    for model in $siblings; do
+      [ "$model" = "$main" ] && continue
+      chain="$chain${chain:+,}{\"provider\":\"$provider\",\"model\":\"$model\"}"
+      used="$used${used:+, }$model"
+      FALLBACK_COUNT=$((FALLBACK_COUNT + 1))
+    done
+    if [ -n "$chain" ] && as_hermes hermes config set fallback_providers "[$chain]" > /dev/null; then
+      ok "$FALLBACK_COUNT de chez Z.ai, avec la même clé ($used)"
+    else
+      FALLBACK_COUNT=0
+      note "aucun : le fournisseur de modèle (${provider:-inconnu}) n'a pas de secours prévu ici. Choisis-en avec hermes fallback add."
+    fi
+  fi
+else
+  note "à régler à la main : hermes fallback add."
+fi
+
 # ---------------------------------------------------------------- Le verrou
 
 # Le serveur est une boîte noire pour le client (docs/securite.md) : ni terminal, ni fichiers, ni exécution de code pour
@@ -646,4 +684,5 @@ printf '  Le client se connecte dans Orion avec son e-mail : aucune clé à lui 
 [ "$APPS_OK" = 1 ] && printf '  Applications : prêtes (« Connecter des applications » dans Orion).\n'
 [ "$BROWSER_OK" = 1 ] && printf '  Navigateur du Mac : prêt (Réglages de l'"'"'app Mac, une fois la case cochée dans chrome://inspect).\n'
 [ "$SERVE_OK" = 1 ] && printf '  Tâches planifiées et fichiers des agents : prêts (ils reviennent dans Orion).\n'
+[ "$FALLBACK_COUNT" -gt 0 ] && printf '  Moteurs de secours : %s prêts.\n' "$FALLBACK_COUNT" || printf '  Moteurs de secours : aucun.\n'
 printf '  Mettre à jour : relance la même commande.\n'
