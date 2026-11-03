@@ -34,8 +34,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.29.0"
-SHA256="d5f31b4cfdcd0161515b53ce10c13fbeec2dda07f1ceeb3b49582fca3749378b"
+VERSION="0.30.0"
+SHA256="cb72c9fc8a778153b9a0311ecad2b3795c347533945242518ee9b7b572d4a982"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
@@ -448,6 +448,11 @@ PORT=$SYNC_PORT
 ORION_MCP_TOKEN=$MCP_TOKEN
 EOF
 [ -z "$SERVER_KEY" ] || printf 'ACCOUNT_SERVER_KEY=%s\n' "$SERVER_KEY" >> "$SYNCF.new"
+# Qui répond dans un groupe : Jev (TypeSafe, par orionspace.ai avec la clé du serveur) décide en 0,2 s, au lieu d'une
+# tâche de l'agent de 12 s et 12 000 tokens ; quand il n'est pas sûr, la tâche reprend la main. Environ 0,0001 $ par
+# message. Un réglage posé à la main (off, shadow) reste.
+TRIAGE=$(kv_get "$SYNCF" JEV_TRIAGE)
+[ -z "$SERVER_KEY" ] || printf 'JEV_TRIAGE=%s\n' "${TRIAGE:-on}" >> "$SYNCF.new"
 [ -z "$RELAY_KEY" ] || printf 'PUSH_RELAY_URL=%s\nPUSH_RELAY_KEY=%s\n' "$RELAY_URL" "$RELAY_KEY" >> "$SYNCF.new"
 # L'écran des agents n'est pas installé ici : le tableau de bord ne sert qu'aux tâches planifiées et aux fichiers. Une
 # fois l'écran installé à la main (README, « L'écran des agents »), HERMES_SCREEN=true dans ce fichier reste.
