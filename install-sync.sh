@@ -34,8 +34,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.36.0"
-SHA256="3f7ca03da77837a4c3d701f18ff9dace81a509d7cd2f42ebb7d480c793350e92"
+VERSION="0.37.0"
+SHA256="4bf67f2fe1b8aad23f377e7ab8a0fe0889c04dfcec98aa351b6953f6e8d4c42e"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
@@ -578,6 +578,23 @@ elif [ -n "$HBIN" ]; then
 else
   note "à ajouter dans $HH/config.yaml, sous mcp_servers: orion-apps (url http://127.0.0.1:$SYNC_PORT/mcp/apps,"
   note "headers Authorization: Bearer \${ORION_MCP_TOKEN}, timeout 300), et sous tools: connectors: enabled: false."
+fi
+
+# ---------------------------------------------------------------- Les savoir-faire, pour Hermes
+
+# Hermes ne range les savoir-faire que par profil : Orion Sync tient la bibliothèque et donne à chaque agent les siens
+# (src/skills.ts). L'agent lit une méthode avec l'outil skill_read du serveur MCP orion-skills ; les outils de
+# savoir-faire de Hermes restent coupés pour l'API (deploy/verrou.sh). Il faut le tableau de bord (hermes serve).
+step "Les savoir-faire"
+if [ -n "$HBIN" ]; then
+  as_hermes hermes config set mcp_servers.orion-skills.url "http://127.0.0.1:$SYNC_PORT/mcp/skills" > /dev/null
+  as_hermes hermes config set mcp_servers.orion-skills.headers.Authorization 'Bearer ${ORION_MCP_TOKEN}' > /dev/null
+  as_hermes hermes config set mcp_servers.orion-skills.timeout 60 > /dev/null
+  as_hermes hermes config set mcp_servers.orion-skills.enabled true > /dev/null
+  ok "Hermes connaît les savoir-faire d'Orion (serveur MCP orion-skills)"
+else
+  note "à ajouter dans $HH/config.yaml, sous mcp_servers: orion-skills (url http://127.0.0.1:$SYNC_PORT/mcp/skills,"
+  note "headers Authorization: Bearer \${ORION_MCP_TOKEN}, timeout 60)."
 fi
 
 # ---------------------------------------------------------------- Le navigateur du Mac, pour Hermes
