@@ -34,8 +34,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.40.0"
-SHA256="e6b2d2d05a64db07987d2635193052b39db5a74bb47ec9a8d8074dc343ff292b"
+VERSION="0.41.0"
+SHA256="69b90d1e0b93a5dd2fbde60b437792a88f10323cd5e9ac34edbc2459b6c19be1"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
@@ -458,6 +458,9 @@ TRIAGE=$(kv_get "$SYNCF" JEV_TRIAGE)
 # fois l'écran installé à la main (README, « L'écran des agents »), HERMES_SCREEN=true dans ce fichier reste.
 SCREEN=$(kv_get "$SYNCF" HERMES_SCREEN)
 [ "$SERVE_OK" = 0 ] || printf 'HERMES_SERVE_URL=http://127.0.0.1:%s\nHERMES_SERVE_TOKEN=%s\nHERMES_SCREEN=%s\n' "$SERVE_PORT" "$SERVE_TOKEN" "${SCREEN:-false}" >> "$SYNCF.new"
+# L'outil memory_search (ticket #19) : Hermes l'a déjà, vérifié par une installation précédente (« La mémoire des agents »).
+MEMORY_MCP=$(kv_get "$SYNCF" ORION_MEMORY_MCP)
+[ "$MEMORY_MCP" != true ] || printf 'ORION_MEMORY_MCP=true\n' >> "$SYNCF.new"
 chmod 600 "$SYNCF.new"
 mv "$SYNCF.new" "$SYNCF"
 ok "configuration : $SYNCF (root seul)"
@@ -597,6 +600,55 @@ else
   note "headers Authorization: Bearer \${ORION_MCP_TOKEN}, timeout 60)."
 fi
 
+# ---------------------------------------------------------------- Le cerveau, pour Hermes
+
+# Une page par personne, entreprise et projet de la vie du client (src/brain.ts, ticket #25), dans la base d'Orion
+# Sync : rien d'autre à installer. L'agent la lit et l'écrit par les outils du serveur MCP orion-brain, avec la même
+# clé que le terminal du Mac.
+step "Le cerveau"
+BRAIN_OK=0
+if [ -n "$HBIN" ]; then
+  as_hermes hermes config set mcp_servers.orion-brain.url "http://127.0.0.1:$SYNC_PORT/mcp/brain" > /dev/null
+  as_hermes hermes config set mcp_servers.orion-brain.headers.Authorization 'Bearer ${ORION_MCP_TOKEN}' > /dev/null
+  as_hermes hermes config set mcp_servers.orion-brain.timeout 60 > /dev/null
+  as_hermes hermes config set mcp_servers.orion-brain.enabled true > /dev/null
+  ok "Hermes connaît le cerveau d'Orion (serveur MCP orion-brain)"
+  tested=$(as_hermes hermes mcp test orion-brain 2>&1 || true)
+  if grep -q brain_search <<< "$tested"; then BRAIN_OK=1; else warn "hermes mcp test orion-brain ne trouve pas les outils."; fi
+else
+  note "à ajouter dans $HH/config.yaml, sous mcp_servers: orion-brain (url http://127.0.0.1:$SYNC_PORT/mcp/brain,"
+  note "headers Authorization: Bearer \${ORION_MCP_TOKEN}, timeout 60)."
+fi
+
+# ---------------------------------------------------------------- La mémoire des agents, pour Hermes
+
+# La mémoire propre d'un agent (ticket #19) : l'essentiel part avec chaque message, le reste se cherche avec l'outil
+# memory_search du serveur MCP orion-memory (src/memorySearch.ts). Le service ne sait pas lui-même si Hermes le connaît :
+# une fois vérifié, ORION_MEMORY_MCP=true dans sync.env lui fait annoncer « memory-search », et les apps s'en servent.
+step "La mémoire des agents"
+MEMORY_OK=0
+if [ -n "$HBIN" ]; then
+  as_hermes hermes config set mcp_servers.orion-memory.url "http://127.0.0.1:$SYNC_PORT/mcp/memory" > /dev/null
+  as_hermes hermes config set mcp_servers.orion-memory.headers.Authorization 'Bearer ${ORION_MCP_TOKEN}' > /dev/null
+  as_hermes hermes config set mcp_servers.orion-memory.timeout 30 > /dev/null
+  as_hermes hermes config set mcp_servers.orion-memory.enabled true > /dev/null
+  tested=$(as_hermes hermes mcp test orion-memory 2>&1 || true)
+  if grep -q memory_search <<< "$tested"; then
+    MEMORY_OK=1
+    ok "Hermes connaît la mémoire des agents (serveur MCP orion-memory)"
+    if [ "$(kv_get "$SYNCF" ORION_MEMORY_MCP)" != true ]; then
+      kv_set "$SYNCF" ORION_MEMORY_MCP true
+      # La variable n'est lue qu'au démarrage : le conteneur repart avec elle.
+      COMPOSE_PROFILES=$PROFILES docker compose -f "$DIR/compose.yaml" up -d sync > "$tmp/compose-memory.log" 2>&1 || warn "Orion Sync n'a pas redémarré : il annoncera « memory-search » au prochain démarrage."
+    fi
+  else
+    warn "hermes mcp test orion-memory ne trouve pas l'outil : les agents relisent leur mémoire comme avant."
+  fi
+else
+  note "à ajouter dans $HH/config.yaml, sous mcp_servers: orion-memory (url http://127.0.0.1:$SYNC_PORT/mcp/memory,"
+  note "headers Authorization: Bearer \${ORION_MCP_TOKEN}, timeout 30), puis ORION_MEMORY_MCP=true dans $SYNCF."
+fi
+
 # ---------------------------------------------------------------- Le navigateur du Mac, pour Hermes
 
 # Hermes confie son navigateur à Orion Sync (src/browser.ts), qui le relaie à l'app Mac : les agents naviguent dans le
@@ -705,6 +757,8 @@ printf '  Le client se connecte dans Orion avec son e-mail : aucune clé à lui 
 [ "$MCP_OK" = 1 ] && printf '  Terminal du Mac : prêt (Réglages, « Ce Mac » dans l'"'"'app Mac).\n'
 [ "$APPS_OK" = 1 ] && printf '  Applications : prêtes (« Connecter des applications » dans Orion).\n'
 [ "$BROWSER_OK" = 1 ] && printf '  Navigateur du Mac : prêt (Réglages de l'"'"'app Mac, une fois la case cochée dans chrome://inspect).\n'
+[ "$BRAIN_OK" = 1 ] && printf '  Cerveau : prêt (« Cerveau » dans le menu d'"'"'Orion, à côté des documents).\n'
 [ "$SERVE_OK" = 1 ] && printf '  Tâches planifiées et fichiers des agents : prêts (ils reviennent dans Orion).\n'
+[ "$MEMORY_OK" = 1 ] && printf '  Mémoire des agents : prête (ils retrouvent leurs anciens souvenirs).\n'
 [ "$FALLBACK_COUNT" -gt 0 ] && printf '  Moteurs de secours : %s prêts.\n' "$FALLBACK_COUNT" || printf '  Moteurs de secours : aucun.\n'
 printf '  Mettre à jour : relance la même commande.\n'
