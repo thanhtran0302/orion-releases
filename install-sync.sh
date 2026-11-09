@@ -34,8 +34,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.47.0"
-SHA256="5d9a627b6b90eeffb5ba69fe808a4a354befa6fea214f2bb58fc662c9e706e24"
+VERSION="0.48.0"
+SHA256="6997441eda0569dbdbbb3257bc7f83f75262001eadb6f66859d83123fba0b907"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
@@ -96,6 +96,16 @@ kv_set() {
 json_get() { printf '%s' "$1" | grep -o "\"$2\":\"[^\"]*\"" | head -n 1 | cut -d'"' -f4 || true; }
 
 port_used() { ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
+
+# La clé du courrier des agents (ticket 50) : une clé privée ECDH P-256, en JWK, en JSON sur une ligne. Par le node de la
+# machine s'il est là, sinon par l'image node:24-alpine dont le service est fait. Jamais affichée.
+MAIL_KEY_JS='const k=require("node:crypto").generateKeyPairSync("ec",{namedCurve:"P-256"}).privateKey.export({format:"jwk"});process.stdout.write(JSON.stringify({kty:k.kty,crv:k.crv,x:k.x,y:k.y,d:k.d}))'
+new_mail_key() {
+  local key=""
+  if command -v node > /dev/null; then key=$(node -e "$MAIL_KEY_JS" 2>/dev/null) || key=""; fi
+  case "$key" in '{"kty":"EC"'*) ;; *) key=$(docker run --rm node:24-alpine node -e "$MAIL_KEY_JS" 2>/dev/null) || key="" ;; esac
+  case "$key" in '{"kty":"EC"'*) printf '%s' "$key" ;; *) return 1 ;; esac
+}
 
 # ---------------------------------------------------------------- Options
 
@@ -435,6 +445,7 @@ kv_set "$ENVF" HERMES_PORT "$HERMES_PORT"
 
 # La clé de Hermes, pour relayer vers lui ; jamais affichée. La clé de Hermes venue de l'extérieur est refusée : les
 # appareils n'entrent qu'avec leur propre clé, reçue en se connectant avec le compte.
+install -m 600 /dev/null "$SYNCF.new"
 cat > "$SYNCF.new" <<EOF
 DATABASE_URL=postgres://orion:$PG_PASSWORD@127.0.0.1:$PG_PORT/orion
 HERMES_URL=http://127.0.0.1:$HERMES_PORT
@@ -461,6 +472,15 @@ SCREEN=$(kv_get "$SYNCF" HERMES_SCREEN)
 # L'outil memory_search (ticket #19) : Hermes l'a déjà, vérifié par une installation précédente (« La mémoire des agents »).
 MEMORY_MCP=$(kv_get "$SYNCF" ORION_MEMORY_MCP)
 [ "$MEMORY_MCP" != true ] || printf 'ORION_MEMORY_MCP=true\n' >> "$SYNCF.new"
+# Le courrier des agents (ticket 50) : la clé privée du serveur, créée la première fois et jamais changée ensuite (une
+# nouvelle clé perdrait les mails pas encore lus) ; orionspace.ai n'en reçoit que la moitié publique. Le MIME d'origine
+# et les pièces jointes vont dans le volume « mail » du service (compose.yaml), que le bac à sable de l'agent ne voit pas.
+MAIL_KEY=$(kv_get "$SYNCF" MAIL_KEY)
+if [ -z "$MAIL_KEY" ]; then
+  MAIL_KEY=$(new_mail_key) || die "la clé du courrier des agents n'a pas pu être créée (ni node, ni l'image node:24-alpine)."
+  ok "clé du courrier des agents créée (elle reste sur ce serveur)"
+fi
+printf 'MAIL_KEY=%s\nMAIL_DIR=/srv/orion-courrier\n' "$MAIL_KEY" >> "$SYNCF.new"
 chmod 600 "$SYNCF.new"
 mv "$SYNCF.new" "$SYNCF"
 ok "configuration : $SYNCF (root seul)"
