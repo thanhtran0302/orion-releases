@@ -34,8 +34,8 @@
 #   --yes                sans questions
 set -euo pipefail
 
-VERSION="0.48.0"
-SHA256="6997441eda0569dbdbbb3257bc7f83f75262001eadb6f66859d83123fba0b907"
+VERSION="0.49.0"
+SHA256="b955c7d15dc0504e0cf20cd19f5e69e679386f2606550196b9c43cc6058b99a0"
 RELEASES="https://github.com/thanhtran0302/orion-releases/releases/download/sync-v$VERSION"
 DIR=/opt/orion
 ENVF="$DIR/.env"
@@ -464,6 +464,10 @@ EOF
 # message. Un réglage posé à la main (off, shadow) reste.
 TRIAGE=$(kv_get "$SYNCF" JEV_TRIAGE)
 [ -z "$SERVER_KEY" ] || printf 'JEV_TRIAGE=%s\n' "${TRIAGE:-on}" >> "$SYNCF.new"
+# En conversation directe, un « ok » ou un « parfait » qui n'appelle pas de réponse : Jev le dit en 0,2 s, et l'agent y
+# réagit d'un emoji au lieu de relire toute sa consigne pour répondre « de rien ». Seulement les messages courts.
+ACK=$(kv_get "$SYNCF" JEV_ACK)
+[ -z "$SERVER_KEY" ] || printf 'JEV_ACK=%s\n' "${ACK:-on}" >> "$SYNCF.new"
 [ -z "$RELAY_KEY" ] || printf 'PUSH_RELAY_URL=%s\nPUSH_RELAY_KEY=%s\n' "$RELAY_URL" "$RELAY_KEY" >> "$SYNCF.new"
 # L'écran des agents n'est pas installé ici : le tableau de bord ne sert qu'aux tâches planifiées et aux fichiers. Une
 # fois l'écran installé à la main (README, « L'écran des agents »), HERMES_SCREEN=true dans ce fichier reste.
